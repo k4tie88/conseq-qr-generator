@@ -4,12 +4,20 @@ import re
 import segno
 from io import BytesIO
 
-# --- 1. IBAN PŘEVODNÍK ---
+# --- 1. IBAN PŘEVODNÍK (OŠETŘENÝ PRO MEZERY) ---
 def czech_to_iban(account_number, bank_code):
-    if '-' in account_number:
-        prefix, acc = account_number.split('-')
+    # Odstraníme mezery z čísla účtu (např. "6850 057" -> "6850057")
+    clean_acc = account_number.replace(" ", "")
+    
+    if '-' in clean_acc:
+        prefix, acc = clean_acc.split('-')
+    elif len(clean_acc) > 10: # Pokud je číslo dlouhé, zkusíme ho rozdělit (časté u Conseq)
+        # Předpokládáme, že posledních 10 číslic je hlavní účet, zbytek prefix
+        prefix = clean_acc[:-10]
+        acc = clean_acc[-10:]
     else:
-        prefix, acc = "0", account_number
+        prefix, acc = "0", clean_acc
+        
     prefix, acc = prefix.zfill(6), acc.zfill(10)
     check_str = f"{bank_code}{prefix}{acc}123500"
     mod = int(check_str) % 97
@@ -27,21 +35,23 @@ if file:
         for page in pdf.pages:
             full_text += page.extract_text() + "\n"
     
-    # Detekce, zda jde o DIP
     is_dip = "DIP" in full_text.upper() or "DLOUHODOBÝ INVESTIČNÍ PRODUKT" in full_text.upper()
     
-    # --- CHYTRÉ VYHLEDÁVÁNÍ ÚČTŮ Z TABULKY INSTRUKCÍ ---
+    # --- OPRAVENÉ VYHLEDÁVÁNÍ ÚČTŮ (BERE I MEZERY) ---
     def find_account_by_label(label, text):
-        pattern = label + r'.*?(\d{0,6}-?\d{2,10})\s*/\s*(\d{4})'
+        # Hledáme label a pak řetězec čísel a mezer zakončený lomítkem a kódem banky
+        # Tento regex schroustne "6850 057 / 2700" i "6850057/2700"
+        pattern = label + r'.*?([\d\s-]{2,15})\s*/\s*(\d{4})'
         match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
         if match:
-            return f"{match.group(1)} / {match.group(2)}"
+            raw_acc = match.group(1).strip()
+            bank_code = match.group(2).strip()
+            return f"{raw_acc} / {bank_code}"
         return None
 
     acc_czk = find_account_by_label("Číslo účtu v CZK", full_text)
     acc_eur = find_account_by_label("Číslo účtu v EUR", full_text)
     
-    # Detekce VS (číslo smlouvy 41...)
     vs_match = re.search(r'41\d{8}', full_text)
     found_vs = vs_match.group(0) if vs_match else ""
 
@@ -57,7 +67,6 @@ if file:
         else:
             st.warning("📄 Detekována klasická smlouva (bez DIP)")
             rezim = st.radio("Kdo platí?", ["Zaměstnanec"])
-            st.info("U smluv bez DIP není povolena platba zaměstnavatele.")
         
         currency = st.selectbox("Měna platby:", ["CZK", "EUR"])
         detected_acc = acc_czk if currency == "CZK" else acc_eur
@@ -66,24 +75,20 @@ if file:
             st.write(f"📍 Cílový účet z tabulky: **{detected_acc}**")
         else:
             st.error(f"❌ V tabulce nebyl nalezen účet pro {currency}!")
-            detected_acc = st.text_input("Zadejte cílový účet ručně (např. 6850057/2700):")
+            detected_acc = st.text_input("Zadejte cílový účet ručně (např. 6850 057/2700):")
 
         amt = st.number_input(f"Částka ({currency}):", value=0.0, step=100.0)
         f_vs = st.text_input("Variabilní symbol (Číslo smlouvy):", value=found_vs)
 
-        # Logika SS
-        f_ss = ""
-        if rezim == "Zaměstnanec":
-            f_ss = "999"
-        elif rezim == "Zaměstnavatel - Var 1 (Příspěvek)":
+        f_ss = "999" if rezim == "Zaměstnanec" else ""
+        if rezim == "Zaměstnavatel - Var 1 (Příspěvek)":
             f_ss = st.text_input("Zadejte IČO zaměstnavatele (pro SS):")
-        elif rezim == "Zaměstnavatel - Var 2 (Hromadná)":
-            f_ss = ""
 
     with col2:
         st.subheader("📱 QR kód a kontrola")
         if detected_acc and " / " in detected_acc:
             acc_p, bank_p = detected_acc.split(" / ")
+            # Tady se volá opravený převodník
             iban = czech_to_iban(acc_p, bank_p)
 
             if st.button("VYGENEROVAT"):
