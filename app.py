@@ -32,61 +32,57 @@ if file:
     
     is_dip = "DIP" in full_text.upper() or "DLOUHODOBÝ INVESTIČNÍ PRODUKT" in full_text.upper()
 
-    # --- NOVÁ STRATEGIE: POŘADÍ ÚČTŮ ---
-    # Najdeme všechny formáty účtů v celém PDF
+    # Najdeme všechny účty ve formátu XXXXX / XXXX v celém PDF
     all_found = re.findall(r'([\d\s-]{5,16})\s*/\s*(\d{4})', full_text)
-    
-    # Vyčištění a formátování nalezených účtů
-    valid_accounts = [f"{m[0].strip()} / {m[1].strip()}" for m in all_found]
+    accounts = [f"{m[0].strip()} / {m[1].strip()}" for m in all_found]
 
-    # Logika pro Conseq:
-    # 1. účet v PDF bývá klientka (sekce A) -> ignorujeme nebo dáme až na konec
-    # 2. účet v PDF bývá CZK v tabulce (sekce Instrukce)
-    # 3. účet v PDF bývá EUR v tabulce (sekce Instrukce)
-    
-    acc_czk = None
-    acc_eur = None
-    
-    if len(valid_accounts) >= 3:
-        acc_czk = valid_accounts[1] # Druhý nalezený v pořadí
-        acc_eur = valid_accounts[2] # Třetí nalezený v pořadí
-    elif len(valid_accounts) == 2:
-        acc_czk = valid_accounts[1]
+    # Detekce VS
+    vs_match = re.search(r'41\d{8}', full_text)
+    found_vs = vs_match.group(0) if vs_match else ""
 
-    # --- UI ---
     st.divider()
     col1, col2 = st.columns([1, 1])
 
     with col1:
         st.subheader("⚙️ Parametry platby")
         
-        # Volba režimu (DIP vs Klasik)
         if is_dip:
             st.success("✅ Smlouva DIP")
-            rezim = st.radio("Kdo platí?", ["Zaměstnanec", "Zaměstnavatel - Var 1 (Příspěvek)", "Zaměstnavatel - Var 2 (Bulk)"])
+            rezim = st.radio("Kdo platí?", ["Zaměstnanec", "Zaměstnavatel - Var 1 (Příspěvek)", "Zaměstnavatel - Var 2 (Hromadná)"])
         else:
             st.warning("📄 Klasická smlouva (bez DIP)")
             rezim = st.radio("Kdo platí?", ["Zaměstnanec"])
 
-        # Volba měny
-        currency = st.selectbox("Měna platby:", ["CZK", "EUR"])
+        currency = st.selectbox("Měna:", ["CZK", "EUR"])
+
+        # --- LOGIKA VÝBĚRU ÚČTU PODLE REŽIMU A POŘADÍ V PDF ---
+        # Indexy v poli 'accounts':
+        # [0] = Klientka, [1] = CZK Zaměstnanec, [2] = EUR Zaměstnanec
+        # [3] = CZK Zaměstnavatel (Var 1), [4] = CZK Zaměstnavatel (Var 2)
         
-        # Přiřazení na základě tabulky
-        detected_acc = acc_czk if currency == "CZK" else acc_eur
+        detected_acc = None
         
+        try:
+            if rezim == "Zaměstnanec":
+                detected_acc = accounts[1] if currency == "CZK" else accounts[2]
+            elif rezim == "Zaměstnavatel - Var 1 (Příspěvek)":
+                # Bere první řádek z tabulky pro zaměstnavatele (obvykle 4. účet v PDF)
+                detected_acc = accounts[3] if len(accounts) > 3 else accounts[1]
+            elif rezim == "Zaměstnavatel - Var 2 (Hromadná)":
+                # Bere druhý řádek z tabulky pro zaměstnavatele (obvykle 5. účet v PDF)
+                detected_acc = accounts[4] if len(accounts) > 4 else accounts[1]
+        except IndexError:
+            detected_acc = accounts[1] if len(accounts) > 1 else None
+
         if detected_acc:
-            st.info(f"📍 Účet pro {currency} z tabulky: **{detected_acc}**")
+            st.info(f"📍 Účet pro {rezim} ({currency}): **{detected_acc}**")
         else:
-            st.error(f"❌ Účet pro {currency} nenalezen.")
+            st.error("❌ Účet v PDF nenalezen.")
             detected_acc = st.text_input("Zadejte účet ručně:")
 
         amt = st.number_input(f"Částka ({currency}):", value=0.0)
+        f_vs = st.text_input("Variabilní symbol:", value=found_vs)
         
-        # Detekce VS
-        vs_match = re.search(r'41\d{8}', full_text)
-        f_vs = st.text_input("Variabilní symbol (Smlouva):", value=vs_match.group(0) if vs_match else "")
-        
-        # Logika SS
         f_ss = "999" if rezim == "Zaměstnanec" else ""
         if rezim == "Zaměstnavatel - Var 1 (Příspěvek)":
             f_ss = st.text_input("Zadejte IČO (pro SS):")
