@@ -32,76 +32,81 @@ if file:
     
     is_dip = "DIP" in full_text.upper() or "DLOUHODOBÝ INVESTIČNÍ PRODUKT" in full_text.upper()
 
-    # --- NOVÁ STRATEGIE: NAJÍT VŠECHNY ÚČTY A PŘIŘADIT JE ---
-    # Najdeme všechny výskyty formátu XXXXX / XXXX
-    all_accounts = re.findall(r'([\d\s-]{5,16})\s*/\s*(\d{4})', full_text)
+    # --- NOVÁ STRATEGIE: POŘADÍ ÚČTŮ ---
+    # Najdeme všechny formáty účtů v celém PDF
+    all_found = re.findall(r'([\d\s-]{5,16})\s*/\s*(\d{4})', full_text)
     
-    # Teď zkusíme najít, který patří k CZK a který k EUR na základě pozice v textu
+    # Vyčištění a formátování nalezených účtů
+    valid_accounts = [f"{m[0].strip()} / {m[1].strip()}" for m in all_found]
+
+    # Logika pro Conseq:
+    # 1. účet v PDF bývá klientka (sekce A) -> ignorujeme nebo dáme až na konec
+    # 2. účet v PDF bývá CZK v tabulce (sekce Instrukce)
+    # 3. účet v PDF bývá EUR v tabulce (sekce Instrukce)
+    
     acc_czk = None
     acc_eur = None
+    
+    if len(valid_accounts) >= 3:
+        acc_czk = valid_accounts[1] # Druhý nalezený v pořadí
+        acc_eur = valid_accounts[2] # Třetí nalezený v pořadí
+    elif len(valid_accounts) == 2:
+        acc_czk = valid_accounts[1]
 
-    for match in all_accounts:
-        acc_str = f"{match[0].strip()} / {match[1].strip()}"
-        # Hledáme, jestli je v okolí 50 znaků před tímto číslem měna
-        pos = full_text.find(match[0])
-        context = full_text[max(0, pos-60):pos] # kousek textu před číslem
-        
-        if "CZK" in context.upper() and not acc_czk:
-            acc_czk = acc_str
-        elif "EUR" in context.upper() and not acc_eur:
-            acc_eur = acc_str
-
-    vs_match = re.search(r'41\d{8}', full_text)
-    found_vs = vs_match.group(0) if vs_match else ""
-
+    # --- UI ---
     st.divider()
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        st.subheader("⚙️ Nastavení platby")
+        st.subheader("⚙️ Parametry platby")
         
+        # Volba režimu (DIP vs Klasik)
         if is_dip:
             st.success("✅ Smlouva DIP")
-            rezim = st.radio("Kdo platí?", ["Zaměstnanec", "Zaměstnavatel - Var 1 (Příspěvek)", "Zaměstnavatel - Var 2 (Hromadná)"])
+            rezim = st.radio("Kdo platí?", ["Zaměstnanec", "Zaměstnavatel - Var 1 (Příspěvek)", "Zaměstnavatel - Var 2 (Bulk)"])
         else:
             st.warning("📄 Klasická smlouva (bez DIP)")
             rezim = st.radio("Kdo platí?", ["Zaměstnanec"])
 
+        # Volba měny
         currency = st.selectbox("Měna platby:", ["CZK", "EUR"])
+        
+        # Přiřazení na základě tabulky
         detected_acc = acc_czk if currency == "CZK" else acc_eur
         
         if detected_acc:
-            st.info(f"📍 Detekován účet pro {currency}: **{detected_acc}**")
+            st.info(f"📍 Účet pro {currency} z tabulky: **{detected_acc}**")
         else:
-            st.error(f"❌ Účet pro {currency} nebyl automaticky nalezen.")
-            detected_acc = st.text_input("Zadejte účet ručně (např. 6850 057 / 2700):")
+            st.error(f"❌ Účet pro {currency} nenalezen.")
+            detected_acc = st.text_input("Zadejte účet ručně:")
 
         amt = st.number_input(f"Částka ({currency}):", value=0.0)
-        f_vs = st.text_input("Variabilní symbol (Smlouva):", value=found_vs)
         
+        # Detekce VS
+        vs_match = re.search(r'41\d{8}', full_text)
+        f_vs = st.text_input("Variabilní symbol (Smlouva):", value=vs_match.group(0) if vs_match else "")
+        
+        # Logika SS
         f_ss = "999" if rezim == "Zaměstnanec" else ""
         if rezim == "Zaměstnavatel - Var 1 (Příspěvek)":
-            f_ss = st.text_input("IČO pro Specifický symbol:")
+            f_ss = st.text_input("Zadejte IČO (pro SS):")
 
     with col2:
-        st.subheader("📱 Generování")
+        st.subheader("📱 QR kód")
         if detected_acc and "/" in detected_acc:
             acc_p, bank_p = detected_acc.split("/")
             iban = czech_to_iban(acc_p.strip(), bank_p.strip())
 
-            if st.button("VYGENEROVAT QR KÓD"):
+            if st.button("VYGENEROVAT"):
                 if "Var 1" in rezim and not f_ss:
                     st.error("Chybí IČO!")
                 else:
-                    amt_fmt = "{:.2f}".format(amt)
-                    payload = f"SPD*1.0*ACC:{iban}*AM:{amt_fmt}*CC:{currency}*X-VS:{f_vs}*X-SS:{f_ss}*"
+                    payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(amt)}*CC:{currency}*X-VS:{f_vs}"
+                    if f_ss: payload += f"*X-SS:{f_ss}"
+                    payload += "*"
                     
                     qr = segno.make(payload, error='m')
                     out = BytesIO()
                     qr.save(out, kind='png', scale=12, border=4)
                     st.image(out)
-                    
-                    st.success("Kontrola:")
-                    st.write(f"🏦 BÚ: {detected_acc}")
-                    st.write(f"🌍 IBAN: `{iban}`")
-                    st.write(f"🔢 VS: {f_vs} | SS: {f_ss if f_ss else 'neuveden'}")
+                    st.write(f"🏦 BÚ: {detected_acc} | VS: {f_vs} | SS: {f_ss}")
