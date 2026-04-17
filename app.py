@@ -22,13 +22,11 @@ def czech_to_iban(account_number, bank_code):
 st.set_page_config(page_title="Conseq QR Generátor PRO", layout="wide")
 st.title("🏦 Conseq QR Generátor")
 
-# FIXNÍ ÚČET PRO ZAMĚSTNAVATELE (DIP)
 EMP_ACC_FIXED = "1388083926 / 2700"
 
 file = st.file_uploader("Nahrajte PDF smlouvu", type="pdf")
 
 found_vs = ""
-is_dip = False
 c_accs = []
 
 if file:
@@ -37,7 +35,6 @@ if file:
         for page in pdf.pages:
             text = page.extract_text() or ""
             full_text += text + "\n"
-            # Sbíráme všechny účty pro zaměstnance
             found = re.findall(r'([\d\s-]{5,16})\s*/\s*(\d{4})', text)
             for f in found:
                 clean_num = re.sub(r'\D', '', f[0])
@@ -45,7 +42,6 @@ if file:
         
         vs_match = re.search(r'41\d{8}', full_text)
         found_vs = vs_match.group(0) if vs_match else ""
-        is_dip = "DIP" in full_text.upper() or "DLOUHODOBÝ" in full_text.upper()
 
 st.divider()
 col1, col2 = st.columns([1, 1])
@@ -53,38 +49,37 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.subheader("⚙️ Parametry platby")
     
-    # 1. VÝBĚR PLÁTCE
-    rezim = st.radio("Kdo platí?", ["Zaměstnanec", "Zaměstnavatel - Varianta 1 (Příspěvek)", "Zaměstnavatel - Varianta 2 (Bulk/Hromadně)"])
+    rezim = st.radio("Kdo platí?", [
+        "Zaměstnanec", 
+        "Zaměstnavatel - Varianta 1 (Příspěvek na DIP)", 
+        "Zaměstnavatel - Varianta 2 (Hromadná platba)"
+    ])
     
-    # 2. MĚNA
     currency = st.selectbox("Měna platby:", ["CZK", "EUR"])
 
-    # LOGIKA PŘIŘAZENÍ
     detected_acc = None
-    ks = "3558"
+    ks = ""  # Default je prázdný KS
     f_ss = ""
 
-    if "Zaměstnavatel" in rezim:
-        detected_acc = EMP_ACC_FIXED
-        ks = "3552"
-        if "Varianta 1" in rezim:
-            f_ss = st.text_input("IČO zaměstnavatele (Specifický symbol):")
-        else:
-            f_ss = st.text_input("Období RRRRMM (Specifický symbol):")
-    else:
-        # Zaměstnanec - CZK (057) nebo EUR (081)
-        ks = "3558"
+    if rezim == "Zaměstnanec":
         f_ss = "999"
+        ks = "" # U zaměstnance žádný KS není
         if len(c_accs) >= 3:
             detected_acc = c_accs[1] if currency == "CZK" else c_accs[2]
-        elif len(c_accs) >= 2:
-            detected_acc = c_accs[1]
         else:
-            # Poslední záchrana, pokud by PDF parser selhal
             detected_acc = "6850057 / 2700" if currency == "CZK" else "6850081 / 2700"
 
+    elif rezim == "Zaměstnavatel - Varianta 1 (Příspěvek na DIP)":
+        detected_acc = EMP_ACC_FIXED
+        ks = "3552" # POUZE TADY JE KS 3552
+        f_ss = st.text_input("IČO zaměstnavatele (SS):")
+
+    elif rezim == "Zaměstnavatel - Varianta 2 (Hromadná platba)":
+        detected_acc = EMP_ACC_FIXED
+        ks = "" # Tady KS taky není
+        f_ss = st.text_input("Období RRRRMM (SS):")
+
     st.info(f"🏦 Cílový účet: **{detected_acc}**")
-    
     amt = st.number_input(f"Částka ({currency}):", value=0.0)
     f_vs = st.text_input("Variabilní symbol:", value=found_vs)
 
@@ -96,13 +91,16 @@ with col2:
         
         if st.button("VYGENEROVAT QR KÓD"):
             if "Zaměstnavatel" in rezim and not f_ss:
-                st.error("Chybí Specifický symbol (IČO nebo Období)!")
+                st.error("Doplňte Specifický symbol!")
             else:
-                payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(amt)}*CC:{currency}*X-VS:{f_vs}*X-SS:{f_ss}*X-KS:{ks}*"
+                # Sestavení řetězce - KS se přidá jen když není prázdný
+                payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(amt)}*CC:{currency}*X-VS:{f_vs}*X-SS:{f_ss}"
+                if ks:
+                    payload += f"*X-KS:{ks}"
+                payload += "*"
                 
                 qr = segno.make(payload, error='m')
                 out = BytesIO()
                 qr.save(out, kind='png', scale=12, border=4)
                 st.image(out)
-                
-                st.success(f"Hotovo! Účet: {detected_acc} | SS: {f_ss} | KS: {ks}")
+                st.success(f"BÚ: {detected_acc} | VS: {f_vs} | SS: {f_ss} | KS: {ks if ks else 'není'}")
