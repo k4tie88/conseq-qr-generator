@@ -11,18 +11,17 @@ def czech_to_iban(account_number, bank_code):
         prefix = clean_acc[:-10]
         acc = clean_acc[-10:]
     else:
-        if len(clean_acc) > 6: # Typicky Conseq 6850 057 -> 6850 + 057
+        if len(clean_acc) > 6:
             prefix = clean_acc[:4]
             acc = clean_acc[4:]
         else:
             prefix = "0"
             acc = clean_acc
-    prefix_str = prefix.zfill(6)
-    acc_str = acc.zfill(10)
-    check_str = f"{bank_code}{prefix_str}{acc_str}123500"
+    p_str, a_str = prefix.zfill(6), acc.zfill(10)
+    check_str = f"{bank_code}{p_str}{a_str}123500"
     mod = int(check_str) % 97
     check_digits = 98 - mod
-    return f"CZ{check_digits:02d}{bank_code}{prefix_str}{acc_str}"
+    return f"CZ{check_digits:02d}{bank_code}{p_str}{a_str}"
 
 st.set_page_config(page_title="Conseq QR Generátor PRO", layout="wide")
 st.title("🏦 Conseq QR Generátor")
@@ -37,16 +36,13 @@ if file:
     
     is_dip = "DIP" in full_text.upper() or "DLOUHODOBÝ INVESTIČNÍ PRODUKT" in full_text.upper()
     
-    # --- LOGIKA VYHLEDÁVÁNÍ ÚČTŮ ---
+    # --- OPRAVENÁ LOGIKA VYHLEDÁVÁNÍ ---
     def get_conseq_account(currency, text):
-        lines = text.split('\n')
-        for i, line in enumerate(lines):
-            if f"Číslo účtu v {currency}" in line:
-                # Koukáme na tento řádek a jeden další pod ním
-                search_area = line + " " + (lines[i+1] if i+1 < len(lines) else "")
-                match = re.search(r'([\d\s]{2,16})\s*/\s*(\d{4})', search_area)
-                if match:
-                    return f"{match.group(1).strip()} / {match.group(2).strip()}"
+        # Striktně hledá "v CZK" nebo "v EUR" a k tomu náležící účet
+        pattern = rf"v {currency}:?\s*([\d\s]{2,16})\s*/\s*(\d{{4}})"
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return f"{match.group(1).strip()} / {match.group(2).strip()}"
         return None
 
     acc_czk = get_conseq_account("CZK", full_text)
@@ -68,16 +64,16 @@ if file:
             st.warning("📄 Klasická smlouva (bez DIP)")
             rezim = st.radio("Kdo platí?", ["Zaměstnanec"])
 
-        currency = st.selectbox("Měna platby:", ["CZK", "EUR"])
+        currency = st.selectbox("Měna platby (přepíná účet):", ["CZK", "EUR"])
+        
+        # Klíčový moment: Tady se vybírá proměnná na základě selectboxu
         detected_acc = acc_czk if currency == "CZK" else acc_eur
         
         if detected_acc:
-            st.info(f"📍 Nalezen účet: **{detected_acc}**")
+            st.info(f"📍 Nalezen cílový účet pro {currency}: **{detected_acc}**")
         else:
-            st.error(f"❌ Účet pro {currency} v PDF nenalezen!")
-            # Debug: ukážeme kousek textu, kde by to mělo být
-            st.write("Zkuste zadat účet ručně:")
-            detected_acc = st.text_input("BÚ (např. 6850 057 / 2700):")
+            st.error(f"❌ Účet pro {currency} nebyl v PDF detekován!")
+            detected_acc = st.text_input("Zadejte účet ručně:")
 
         amt = st.number_input(f"Částka ({currency}):", value=0.0)
         f_vs = st.text_input("Variabilní symbol (Smlouva):", value=found_vs)
@@ -95,13 +91,12 @@ if file:
                 if "Var 1" in rezim and not f_ss:
                     st.error("Chybí IČO!")
                 else:
-                    payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(amt)}*CC:{currency}*X-VS:{f_vs}"
-                    if f_ss: payload += f"*X-SS:{f_ss}"
-                    payload += "*"
+                    amt_fmt = "{:.2f}".format(amt)
+                    payload = f"SPD*1.0*ACC:{iban}*AM:{amt_fmt}*CC:{currency}*X-VS:{f_vs}*X-SS:{f_ss}*"
                     
                     qr = segno.make(payload, error='m')
                     out = BytesIO()
                     qr.save(out, kind='png', scale=12, border=4)
                     st.image(out)
-                    st.write(f"🏦 BÚ: {detected_acc} | VS: {f_vs} | SS: {f_ss}")
-                    st.caption(f"IBAN: {iban}")
+                    st.write(f"🏦 BÚ: {detected_acc} | IBAN: {iban}")
+                    st.write(f"🔢 VS: {f_vs} | SS: {f_ss}")
