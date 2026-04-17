@@ -4,28 +4,21 @@ import re
 import segno
 from io import BytesIO
 
-# --- 1. IBAN PŘEVODNÍK (NEPRŮSTŘELNÝ) ---
+# --- 1. IBAN PŘEVODNÍK ---
 def czech_to_iban(account_number, bank_code):
-    # Odstranění mezer a vyčištění
     clean_acc = account_number.replace(" ", "").replace("-", "")
-    
-    # Rozdělení na předčíslí a hlavní číslo (Conseq má 4+7 nebo 4+6)
     if len(clean_acc) > 10:
         prefix = clean_acc[:-10]
         acc = clean_acc[-10:]
     else:
-        # Pokud je to krátké, zkusíme najít, jestli tam nebyla mezera/pomlčka dříve
-        # Pro Conseq 6850 057 je prefix 6850 a acc 057
-        if len(clean_acc) == 7:
+        if len(clean_acc) > 6: # Typicky Conseq 6850 057 -> 6850 + 057
             prefix = clean_acc[:4]
             acc = clean_acc[4:]
         else:
             prefix = "0"
             acc = clean_acc
-            
     prefix_str = prefix.zfill(6)
     acc_str = acc.zfill(10)
-    
     check_str = f"{bank_code}{prefix_str}{acc_str}123500"
     mod = int(check_str) % 97
     check_digits = 98 - mod
@@ -44,21 +37,16 @@ if file:
     
     is_dip = "DIP" in full_text.upper() or "DLOUHODOBÝ INVESTIČNÍ PRODUKT" in full_text.upper()
     
-    # --- NOVÉ STRIKTNÍ VYHLEDÁVÁNÍ ÚČTŮ ---
+    # --- LOGIKA VYHLEDÁVÁNÍ ÚČTŮ ---
     def get_conseq_account(currency, text):
-        # Hledáme label "Číslo účtu v CZK:" nebo "Číslo účtu v EUR:"
-        # A bereme vše až k dalšímu labelu nebo konci řádku
-        pattern = f"Číslo účtu v {currency}:\\s*([\\d\\s/-]+)"
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            raw = match.group(1).strip()
-            # Rozdělení na číslo a kód banky (hledáme lomítko)
-            if "/" in raw:
-                parts = raw.split("/")
-                acc_num = parts[0].strip()
-                # Kód banky jsou první 4 číslice po lomítku
-                bank_code = re.search(r"\d{4}", parts[1]).group(0)
-                return f"{acc_num} / {bank_code}"
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            if f"Číslo účtu v {currency}" in line:
+                # Koukáme na tento řádek a jeden další pod ním
+                search_area = line + " " + (lines[i+1] if i+1 < len(lines) else "")
+                match = re.search(r'([\d\s]{2,16})\s*/\s*(\d{4})', search_area)
+                if match:
+                    return f"{match.group(1).strip()} / {match.group(2).strip()}"
         return None
 
     acc_czk = get_conseq_account("CZK", full_text)
@@ -73,31 +61,29 @@ if file:
     with col1:
         st.subheader("⚙️ Parametry platby")
         
-        # Ošetření DIPu
         if is_dip:
             st.success("✅ Detekována smlouva DIP")
             rezim = st.radio("Kdo platí?", ["Zaměstnanec", "Zaměstnavatel - Var 1 (Příspěvek)", "Zaměstnavatel - Var 2 (Hromadná)"])
         else:
-            st.warning("📄 Detekována klasická smlouva")
+            st.warning("📄 Klasická smlouva (bez DIP)")
             rezim = st.radio("Kdo platí?", ["Zaměstnanec"])
 
-        currency = st.selectbox("Měna platby (v tabulce):", ["CZK", "EUR"])
-        
-        # Výběr správného účtu
+        currency = st.selectbox("Měna platby:", ["CZK", "EUR"])
         detected_acc = acc_czk if currency == "CZK" else acc_eur
         
         if detected_acc:
-            st.info(f"📍 Nalezen účet pro {currency}: **{detected_acc}**")
+            st.info(f"📍 Nalezen účet: **{detected_acc}**")
         else:
             st.error(f"❌ Účet pro {currency} v PDF nenalezen!")
-            detected_acc = st.text_input("Zadejte účet ručně (např. 6850 057 / 2700):")
+            # Debug: ukážeme kousek textu, kde by to mělo být
+            st.write("Zkuste zadat účet ručně:")
+            detected_acc = st.text_input("BÚ (např. 6850 057 / 2700):")
 
-        amt = st.number_input(f"Částka ({currency}):", value=0.0, step=100.0)
-        f_vs = st.text_input("Variabilní symbol (Číslo smlouvy):", value=found_vs)
-        
+        amt = st.number_input(f"Částka ({currency}):", value=0.0)
+        f_vs = st.text_input("Variabilní symbol (Smlouva):", value=found_vs)
         f_ss = "999" if rezim == "Zaměstnanec" else ""
         if rezim == "Zaměstnavatel - Var 1 (Příspěvek)":
-            f_ss = st.text_input("Zadejte IČO zaměstnavatele (pro SS):")
+            f_ss = st.text_input("Zadejte IČO pro SS:")
 
     with col2:
         st.subheader("📱 QR kód")
@@ -107,10 +93,9 @@ if file:
 
             if st.button("VYGENEROVAT"):
                 if "Var 1" in rezim and not f_ss:
-                    st.error("Zadejte IČO!")
+                    st.error("Chybí IČO!")
                 else:
-                    amt_fmt = "{:.2f}".format(amt)
-                    payload = f"SPD*1.0*ACC:{iban}*AM:{amt_fmt}*CC:{currency}*X-VS:{f_vs}"
+                    payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(amt)}*CC:{currency}*X-VS:{f_vs}"
                     if f_ss: payload += f"*X-SS:{f_ss}"
                     payload += "*"
                     
@@ -118,9 +103,5 @@ if file:
                     out = BytesIO()
                     qr.save(out, kind='png', scale=12, border=4)
                     st.image(out)
-                    
-                    st.success("Kontrola údajů:")
-                    st.write(f"🏦 **Bankovní účet:** {detected_acc}")
-                    st.write(f"🌍 **IBAN:** `{iban}`")
-                    st.write(f"💰 **Částka:** {amt_fmt} {currency}")
-                    st.write(f"🔢 **VS:** {f_vs} | **SS:** {f_ss if f_ss else 'neuveden'}")
+                    st.write(f"🏦 BÚ: {detected_acc} | VS: {f_vs} | SS: {f_ss}")
+                    st.caption(f"IBAN: {iban}")
