@@ -4,28 +4,32 @@ import re
 import segno
 from io import BytesIO
 
-# --- 1. IBAN PŘEVODNÍK (Bezpečný) ---
+# --- 1. IBAN PŘEVODNÍK (Opraveno: čistí pomlčky) ---
 def czech_to_iban(account_number, bank_code):
     try:
+        # Odstraní vše kromě číslic (včetně pomlček, mezer atd.)
         clean_acc = re.sub(r'\D', '', account_number)
+        
         if len(clean_acc) > 10:
             prefix, acc = clean_acc[:-10], clean_acc[-10:]
         elif len(clean_acc) > 6:
             prefix, acc = clean_acc[:4], clean_acc[4:]
         else:
             prefix, acc = "0", clean_acc
+            
         p_str, a_str = prefix.zfill(6), acc.zfill(10)
         check_str = f"{bank_code}{p_str}{a_str}123500"
         mod = int(check_str) % 97
         check_digits = 98 - mod
         return f"CZ{check_digits:02d}{bank_code}{p_str}{a_str}"
-    except:
+    except Exception as e:
+        st.error(f"Chyba při výpočtu IBAN: {e}")
         return None
 
 st.set_page_config(page_title="Conseq QR Generator", layout="wide")
 st.title("🏦 Conseq QR Automat")
 
-# --- 2. EXTRAKCE ČÍSLA SMLOUVY (Jediné, co fakt potřebujeme z PDF) ---
+# --- 2. EXTRAKCE ČÍSLA SMLOUVY ---
 def get_vs_from_pdf(pdf_file):
     try:
         with pdfplumber.open(pdf_file) as pdf:
@@ -39,7 +43,6 @@ def get_vs_from_pdf(pdf_file):
 # --- 3. UI ---
 file = st.file_uploader("Nahrajte PDF smlouvu", type="pdf")
 
-# Základní data (pokud není nahráno PDF)
 found_vs = ""
 if file:
     found_vs = get_vs_from_pdf(file)
@@ -50,55 +53,70 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.subheader("Parametry platby")
     
-    # Výběr režimu hned na začátku
+    # Výběr režimu - VŠECHNY VARIANTY
     typ = st.selectbox("Typ platby:", [
-        "Zaměstnanec (Vlastní příspěvek) - CZK",
-        "Zaměstnanec (Vlastní příspěvek) - EUR",
-        "Zaměstnavatel (Příspěvek na DIP) - Individuální"
+        "Zaměstnanec - CZK",
+        "Zaměstnanec - EUR",
+        "Zaměstnavatel - Varianta 1 (Individuální)",
+        "Zaměstnavatel - Varianta 2 (Hromadná platba)"
     ])
 
-    # Logika předvyplnění - NATVRDO, aby tam nic nechybělo
+    # Logika předvyplnění
     if "Zaměstnanec" in typ:
         default_acc = "6850057 / 2700" if "CZK" in typ else "6850081 / 2700"
         default_ks = ""
         default_ss = "999"
         curr = "CZK" if "CZK" in typ else "EUR"
-    else:
+    elif "Varianta 1" in typ:
         default_acc = "1388083926 / 2700"
         default_ks = "3552"
-        default_ss = "" # Pro IČO
+        default_ss = "" # Zde uživatel dopíše IČO
+        curr = "CZK"
+    else: # Hromadná platba
+        default_acc = "1388083926 / 2700"
+        default_ks = ""
+        default_ss = ""
         curr = "CZK"
 
-    # RUČNÍ EDITACE (Předvyplněno automaticky)
+    # Pole pro úpravu
     u_acc = st.text_input("Číslo účtu / kód banky:", value=default_acc)
-    u_vs = st.text_input("Variabilní symbol (č. smlouvy):", value=found_vs)
-    u_ss = st.text_input("Specifický symbol (999 nebo IČO):", value=default_ss)
+    u_vs = st.text_input("Variabilní symbol (smlouva):", value=found_vs)
+    
+    # SS pole podle varianty
+    if "Varianta 1" in typ:
+        u_ss = st.text_input("Specifický symbol (IČO):")
+    elif "Hromadná" in typ:
+        u_ss = "" # U hromadné se nevyplňuje
+        st.caption("U hromadné platby se Specifický symbol nevyplňuje.")
+    else:
+        u_ss = st.text_input("Specifický symbol:", value=default_ss)
+        
     u_ks = st.text_input("Konstantní symbol:", value=default_ks)
-    u_amt = st.number_input(f"Částka k úhradě ({curr}):", min_value=0.0, step=100.0)
+    u_amt = st.number_input(f"Částka ({curr}):", min_value=0.0, step=100.0)
 
 with col2:
     st.subheader("Generování")
     if st.button("VYGENEROVAT QR KÓD", type="primary"):
         if not u_acc or "/" not in u_acc:
-            st.error("Chybné číslo účtu! Musí být ve formátu 123/2700")
+            st.error("Chybné číslo účtu!")
         elif not u_vs:
-            st.error("Chybí Variabilní symbol (číslo smlouvy)!")
+            st.error("Chybí Variabilní symbol!")
         else:
-            acc_p, bank_p = u_acc.split("/")
-            iban = czech_to_iban(acc_p.strip(), bank_p.strip())
+            acc_part, bank_part = u_acc.split("/")
+            iban = czech_to_iban(acc_part.strip(), bank_part.strip())
             
             if iban:
-                # Sestavení SPD řetězce
+                # Tvorba platebního řetězce (X- parametry pro CZ standard)
                 payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(u_amt)}*CC:{curr}*X-VS:{u_vs}"
                 if u_ss: payload += f"*X-SS:{u_ss}"
                 if u_ks: payload += f"*X-KS:{u_ks}"
                 payload += "*"
                 
-                # Tvorba obrázku
                 qr = segno.make(payload, error='m')
                 out = BytesIO()
                 qr.save(out, kind='png', scale=10)
-                st.image(out, caption="Naskenujte v bankovní aplikaci")
-                st.code(payload) # Pro kontrolu zobrazíme i textový kód
+                st.image(out, caption="QR platba Conseq")
+                # Zobrazení kódu pro kontrolu (zda tam není pomlčka)
+                st.info(f"IBAN v kódu: {iban}")
             else:
-                st.error("Nepodařilo se vytvořit IBAN. Zkontrolujte číslo účtu.")
+                st.error("Nepodařilo se vygenerovat IBAN.")
