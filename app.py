@@ -22,31 +22,39 @@ def czech_to_iban(account_number, bank_code):
 st.set_page_config(page_title="Conseq QR Automat", layout="wide")
 st.title("🏦 Plně automatický Conseq QR")
 
-# --- 2. LOGIKA EXTRAKCE ---
+# --- 2. LOGIKA EXTRAKCE S FALLBACKY ---
 def extract_data(pdf_file):
-    results = {"vs": "", "is_dip": False, "client_czk": "", "client_eur": "", "emp_acc": ""}
+    # Přednastavené hodnoty (pokud PDF selže, použijí se tyto)
+    results = {
+        "vs": "", 
+        "is_dip": False, 
+        "client_czk": "6850057 / 2700", 
+        "client_eur": "6850081 / 2700", 
+        "emp_acc": "1388083926 / 2700"
+    }
     
-    with pdfplumber.open(pdf_file) as pdf:
-        p1_text = pdf.pages[0].extract_text() or ""
-        vs_match = re.search(r'ČÍSLO SMLOUVY:\s*(\d+)', p1_text)
-        if vs_match: results["vs"] = vs_match.group(1)
-        results["is_dip"] = "DIP" in p1_text or "dlouhodobý investiční produkt" in p1_text.lower()
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            # 1. strana (VS a DIP)
+            p1_text = pdf.pages[0].extract_text() or ""
+            vs_match = re.search(r'ČÍSLO SMLOUVY:\s*(\d+)', p1_text)
+            if vs_match: results["vs"] = vs_match.group(1)
+            results["is_dip"] = "DIP" in p1_text or "dlouhodobý" in p1_text.lower()
 
-        # Účty zaměstnance (poslední strana)
-        last_page = pdf.pages[-1].extract_text() or ""
-        czk_m = re.search(r'v CZK:\s*([\d\s/]+)', last_page)
-        eur_m = re.search(r'v EUR:\s*([\d\s/]+)', last_page)
-        results["client_czk"] = czk_m.group(1).strip() if czk_m else "6850057 / 2700"
-        results["client_eur"] = eur_m.group(1).strip() if eur_m else "6850081 / 2700"
+            # Poslední strana (Účty zaměstnance)
+            lp_text = pdf.pages[-1].extract_text() or ""
+            czk_m = re.search(r'v CZK:\s*([\d\s/]+)', lp_text)
+            eur_m = re.search(r'v EUR:\s*([\d\s/]+)', lp_text)
+            if czk_m: results["client_czk"] = czk_m.group(1).strip()
+            if eur_m: results["client_eur"] = eur_m.group(1).strip()
 
-        # Účet zaměstnavatele (strana 5)
-        if results["is_dip"] and len(pdf.pages) >= 5:
-            p5 = pdf.pages[4]
-            table = p5.extract_table()
-            if table and len(table) >= 2:
-                results["emp_acc"] = table[1][1] if table[1][1] else "1388083926 / 2700"
-            else:
-                results["emp_acc"] = "1388083926 / 2700"
+            # Strana 5 (Zaměstnavatel)
+            if results["is_dip"] and len(pdf.pages) >= 5:
+                table = pdf.pages[4].extract_table()
+                if table and len(table) >= 2:
+                    results["emp_acc"] = table[1][1] if table[1][1] else results["emp_acc"]
+    except:
+        pass # Pokud se čtení PDF úplně sesype, zůstanou tam ty "vytesané" účty nahoře
                 
     return results
 
@@ -63,25 +71,20 @@ if file:
                             ["Zaměstnanec - CZK", "Zaměstnanec - EUR"] + 
                             (["Zaměstnavatel - Příspěvek DIP"] if d["is_dip"] else []))
         
-        # Automatické nastavení podle volby
+        # Automatické přepínání hodnot
         if "Zaměstnanec" in mode:
             current_acc = d["client_czk"] if "CZK" in mode else d["client_eur"]
             current_ks = ""
             current_ss = "999"
         else:
-            current_acc = d["emp_acc"] if d["emp_acc"] else "1388083926 / 2700"
+            current_acc = d["emp_acc"]
             current_ks = "3552"
-            current_ss = "" # Zde se musí dopsat IČO
+            current_ss = "" # Pro IČO
 
-        # TADY JSOU TY AUTOMATICKY VYPLNĚNÁ POLE
+        # Tady jsou pole, která jsou teď VŽDY vyplněná (buď z PDF, nebo natvrdo)
         u_acc = st.text_input("Číslo účtu:", value=current_acc)
-        u_vs = st.text_input("Variabilní symbol:", value=d["vs"])
-        
-        if "Zaměstnavatel" in mode:
-            u_ss = st.text_input("Specifický symbol (IČO):", value="")
-        else:
-            u_ss = st.text_input("Specifický symbol:", value=current_ss)
-            
+        u_vs = st.text_input("Variabilní symbol (Smlouva):", value=d["vs"])
+        u_ss = st.text_input("Specifický symbol:", value=current_ss)
         u_ks = st.text_input("Konstantní symbol:", value=current_ks)
         u_amt = st.number_input("Částka:", value=0.0)
 
@@ -89,9 +92,8 @@ if file:
         st.subheader("QR kód")
         if u_acc and "/" in u_acc:
             acc_p, bank_p = u_acc.split("/")
-            iban = czech_to_iban(acc_p.strip(), bank_p.strip())
-            
             if st.button("GENEROVAT"):
+                iban = czech_to_iban(acc_p.strip(), bank_p.strip())
                 curr = "EUR" if "EUR" in mode else "CZK"
                 payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(u_amt)}*CC:{curr}*X-VS:{u_vs}"
                 if u_ss: payload += f"*X-SS:{u_ss}"
@@ -102,4 +104,4 @@ if file:
                 out = BytesIO()
                 qr.save(out, kind='png', scale=10)
                 st.image(out)
-                st.success("QR kód je hotový!")
+                st.success(f"Hotovo pro {u_acc}")
