@@ -4,114 +4,81 @@ import re
 import segno
 from io import BytesIO
 
-# --- 1. FUNKCE PRO ČIŠTĚNÍ (Všechno kromě čísel jde pryč) ---
-def total_clean(text):
-    if not text:
-        return ""
-    # Odstraní pomlčky, mezery, tečky, písmena... prostě všechno kromě 0-9
-    return re.sub(r'\D', '', str(text))
+# 1. FUNKCE, KTERÁ S JISTOTOU ODSTRANÍ POMOČKY
+def bez_pomlcek(text):
+    if not text: return ""
+    return "".join(filter(str.isdigit, str(text)))
 
-# --- 2. IBAN PŘEVODNÍK ---
-def czech_to_iban(account_number, bank_code):
+# 2. IBAN PŘEVODNÍK
+def vytvor_iban(acc, bank):
     try:
-        # Tady probíhá ta hlavní očista
-        acc = total_clean(account_number)
-        bank = total_clean(bank_code)
-        
-        if len(acc) > 10:
-            prefix, main_acc = acc[:-10], acc[-10:]
-        elif len(acc) > 6:
-            prefix, main_acc = acc[:4], acc[4:]
-        else:
-            prefix, main_acc = "0", acc
-            
-        p_str, a_str = prefix.zfill(6), main_acc.zfill(10)
-        check_str = f"{bank}{p_str}{a_str}123500"
-        mod = int(check_str) % 97
-        check_digits = 98 - mod
-        return f"CZ{check_digits:02d}{bank}{p_str}{a_str}"
-    except:
-        return None
+        a = bez_pomlcek(acc)
+        b = bez_pomlcek(bank)
+        if len(a) > 10: prefix, acc_num = a[:-10], a[-10:]
+        elif len(a) > 6: prefix, acc_num = a[:4], a[4:]
+        else: prefix, acc_num = "0", a
+        p_str, a_str = prefix.zfill(6), acc_num.zfill(10)
+        check = f"{b}{p_str}{a_str}123500"
+        mod = int(check) % 97
+        return f"CZ{98 - mod:02d}{b}{p_str}{a_str}"
+    except: return None
 
-st.set_page_config(page_title="Conseq QR Fix", layout="wide")
-st.title("🏦 Conseq QR Automat (VERZE BEZ POMLČEK)")
+st.set_page_config(page_title="FINAL FIX", layout="wide")
+st.markdown("<h1 style='color: #FF4B4B;'>🏦 CONSEQ FIX (VERZE 2.0)</h1>", unsafe_allow_html=True)
 
-# --- 3. NAČÍTÁNÍ PDF ---
-file = st.file_uploader("Nahrajte PDF", type="pdf")
+# 3. EXTRAKCE SMLOUVY
+file = st.file_uploader("Nahraj PDF", type="pdf")
+if file and "v_symbol" not in st.session_state:
+    with pdfplumber.open(file) as pdf:
+        txt = pdf.pages[0].extract_text() or ""
+        match = re.search(r'SMLOUVY:\s*(\d+)', txt)
+        st.session_state.v_symbol = match.group(1) if match else ""
 
-if file and "pdf_vs" not in st.session_state:
-    try:
-        with pdfplumber.open(file) as pdf:
-            txt = pdf.pages[0].extract_text() or ""
-            m = re.search(r'ČÍSLO SMLOUVY:\s*(\d+)', txt)
-            st.session_state.pdf_vs = m.group(1) if m else ""
-    except:
-        st.session_state.pdf_vs = ""
-
-# --- 4. FORMULÁŘ ---
+# 4. ROZHRANÍ
 col1, col2 = st.columns(2)
-
 with col1:
-    typ = st.selectbox("Vyberte typ platby:", [
-        "Zaměstnanec - CZK", "Zaměstnanec - EUR", 
-        "Zaměstnavatel - Varianta 1 (Individuální)", 
-        "Zaměstnavatel - Varianta 2 (Hromadná)"
-    ])
-
-    # Definice účtů NATVRDO BEZ POMLČEK už v základu
-    if "Zaměstnanec" in typ:
-        base_acc = "6850057" if "CZK" in typ else "6850081"
-        ks_val, ss_val, curr = "", "999", ("CZK" if "CZK" in typ else "EUR")
-    else:
-        base_acc = "1388083926" # Varianta 1 i 2 má stejný účet
-        ks_val = "3552" if "Varianta 1" in typ else ""
-        ss_val = ""
-        curr = "CZK"
-
-    # Políčka pro uživatele
-    u_acc_num = st.text_input("Číslo účtu (bez kódu banky):", value=base_acc)
-    u_bank_code = st.text_input("Kód banky:", value="2700")
-    u_vs = st.text_input("Variabilní symbol (smlouva):", value=st.session_state.get("pdf_vs", ""))
+    typ = st.selectbox("Typ:", ["Zaměstnanec CZK", "Zaměstnanec EUR", "DIP Var.1", "DIP Var.2"])
     
-    if "Varianta 1" in typ:
-        u_ss = st.text_input("Specifický symbol (IČO):", key="ss_input")
+    # Nastavení účtů BEZ POMOČEK přímo v textu
+    if "Zaměstnanec" in typ:
+        acc_def = "6850057" if "CZK" in typ else "6850081"
+        ks_def, ss_def, curr = "", "999", ("CZK" if "CZK" in typ else "EUR")
     else:
-        u_ss = st.text_input("Specifický symbol:", value=ss_val)
-        
-    u_ks = st.text_input("Konstantní symbol:", value=ks_val)
-    u_amt = st.number_input(f"Částka ({curr}):", min_value=0.0)
+        acc_def = "1388083926"
+        ks_def = "3552" if "Var.1" in typ else ""
+        ss_def, curr = "", "CZK"
+
+    u_acc = st.text_input("Číslo účtu (BEZ POMLČKY):", value=acc_def)
+    u_bank = st.text_input("Kód banky:", value="2700")
+    u_vs = st.text_input("Var. symbol:", value=st.session_state.get("v_symbol", ""))
+    u_ss = st.text_input("Spec. symbol (IČO u Var.1):", value=ss_def)
+    u_ks = st.text_input("Konst. symbol:", value=ks_def)
+    u_amt = st.number_input(f"Částka {curr}:", min_value=0.0)
 
 with col2:
-    if st.button("GENEROVAT QR KÓD", type="primary"):
-        # POSLEDNÍ KONTROLA PŘED VYTVOŘENÍM
-        if "Varianta 1" in typ and not u_ss:
-            st.error("Chybí IČO!")
-        elif not u_vs:
-            st.error("Chybí číslo smlouvy!")
+    # Tlačítko má jiný text, abys poznala, že běží nová verze
+    if st.button("🚀 GENEROVAT ČISTÝ QR KÓD", type="primary"):
+        if "Var.1" in typ and not u_ss:
+            st.error("Doplň IČO!")
         else:
-            # Tady probíhá ta magická očista těsně před generováním
-            final_acc = total_clean(u_acc_num)
-            final_bank = total_clean(u_bank_code)
+            # TOTÁLNÍ ČIŠTĚNÍ PŘED GENEROVÁNÍM
+            c_acc = bez_pomlcek(u_acc)
+            c_bank = bez_pomlcek(u_bank)
+            c_vs = bez_pomlcek(u_vs)
+            c_ss = bez_pomlcek(u_ss)
+            c_ks = bez_pomlcek(u_ks)
             
-            iban = czech_to_iban(final_acc, final_bank)
-            
+            iban = vytvor_iban(c_acc, c_bank)
             if iban:
-                # Sestavení platebního řetězce
-                payload = f"SPD*1.0*ACC:{iban}*AM:{'{:.2f}'.format(u_amt)}*CC:{curr}*X-VS:{total_clean(u_vs)}"
-                if u_ss: payload += f"*X-SS:{total_clean(u_ss)}"
-                if u_ks: payload += f"*X-KS:{total_clean(u_ks)}"
-                payload += "*"
+                # Sestavení SPD řetězce - Všechny hodnoty prohnány filtrem bez_pomlcek
+                pay = f"SPD*1.0*ACC:{iban}*AM:{u_amt:.2f}*CC:{curr}*X-VS:{c_vs}"
+                if c_ss: pay += f"*X-SS:{c_ss}"
+                if c_ks: pay += f"*X-KS:{c_ks}"
+                pay += "*"
                 
-                qr = segno.make(payload, error='m')
+                qr = segno.make(pay, error='m')
                 out = BytesIO()
                 qr.save(out, kind='png', scale=10)
-                
                 st.image(out)
-                st.info(f"Účet v QR kódu: {iban}") # Tady uvidíš, že tam pomlčka fakt není
-                st.success("QR kód byl vygenerován čistě bez pomlček.")
-
-# Reset
-if file:
-    if st.button("Nahrát jinou smlouvu"):
-        st.session_state.clear()
-        st.rerun()
+                st.code(pay) # TADY UVIDÍŠ SLOŽENÍ KÓDU - HLEDEJ POMOČKU
+                st.write(f"IBAN: {iban}")
