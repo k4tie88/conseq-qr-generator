@@ -93,7 +93,7 @@ with col2:
                 qr.save(out, kind='png', scale=10)
 
 
-        if st.sidebar.button("Nahrát jinou smlouvu (Vymazat paměť)"):
+      if st.sidebar.button("Nahrát jinou smlouvu (Vymazat paměť)"):
            st.session_state.clear()
            st.rerun()
                 st.image(out, caption=f"VS {c_vs} | KS {c_ks}")
