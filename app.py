@@ -4,7 +4,7 @@ import re
 import segno
 from io import BytesIO
 
-# --- IBAN FUNKCE ---
+# --- IBAN PŘEVODNÍK ---
 def vytvor_iban_dynamicky(account_str):
     try:
         clean = re.sub(r'[^\d/]', '', account_str)
@@ -17,69 +17,63 @@ def vytvor_iban_dynamicky(account_str):
         return f"CZ{str(98 - rem).zfill(2)}{bank}{prefix}{number}"
     except: return None
 
-st.set_page_config(page_title="Conseq QR Debugger", layout="wide")
-st.title("🏦 Conseq QR + 🔍 Debugger")
+st.set_page_config(page_title="Conseq QR Precise", layout="wide")
+st.title("🏦 Conseq QR - Cílené čtení z tabulky IZPP")
 
-file = st.file_uploader("1. NAHRAJTE PDF", type="pdf")
+file = st.file_uploader("Nahrajte PDF smlouvu", type="pdf")
 
 if file:
-    # --- DEBUG INFO ---
-    st.sidebar.header("🔍 Debugger (Co vidí robot)")
-    
     with pdfplumber.open(file) as pdf:
-        full_text = ""
-        for i, page in enumerate(pdf.pages):
-            p_txt = page.extract_text() or ""
-            full_text += p_txt + "\n"
-            st.sidebar.write(f"Strana {i+1}: Načteno {len(p_txt)} znaků")
-        
-    col1, col2 = st.columns([1, 1])
-    
+        # 1. VEZMEME POUZE POSLEDNÍ STRANU
+        last_page = pdf.pages[-1]
+        last_page_text = last_page.extract_text()
+        # 2. PRO CELÝ DOKUMENT (kvůli VS na začátku)
+        full_text = "\n".join([p.extract_text() for p in pdf.pages])
+
+    # --- LOGIKA VYHLEDÁVÁNÍ ---
+    # VS hledáme kdekoli (bývá na začátku)
+    vs_matches = re.findall(r'41\d{8}', full_text)
+    found_vs = vs_matches[0] if vs_matches else ""
+
+    st.sidebar.header("🔍 Kontrola poslední strany")
+    if "Instrukce k zasílání" in last_page_text:
+        st.sidebar.success("✅ Tabulka IZPP nalezena")
+    else:
+        st.sidebar.warning("⚠️ Nadpis IZPP na poslední straně nenalezen")
+
+    col1, col2 = st.columns(2)
     with col1:
         st.subheader("Parametry")
-        curr = st.selectbox("Měna:", ["CZK", "EUR", "USD"])
+        curr = st.selectbox("Vyberte měnu (dle tabulky IZPP):", ["CZK", "EUR", "USD"])
         
-        # --- LOGIKA VS (Číslo smlouvy) ---
-        # Hledáme 10místné číslo začínající na 41
-        vs_matches = re.findall(r'41\d{8}', full_text)
-        found_vs = vs_matches[0] if vs_matches else ""
-        st.sidebar.info(f"Nalezené VS kandidáty: {vs_matches}")
-
-        # --- LOGIKA ÚČTU ---
+        # --- PŘESNÉ HLEDÁNÍ V TABULCE ---
         found_acc = ""
-        # Hledáme text za 'Číslo účtu v [Měna]'
-        # Používáme flexibilní regex pro různé formáty zápisu
-        acc_pattern = rf'účtu\s+v\s+{curr}[:\s]*([\d\s/]+)'
-        acc_match = re.search(acc_pattern, full_text, re.IGNORECASE)
+        # Hledáme vzor: "Číslo účtu v [Měna]" a vezmeme první číslo s lomítkem za tím
+        # Regex hledá název sloupce a pak "skáče" přes text až k číslu účtu
+        pattern = rf'Číslo\s+účtu\s+v\s+{curr}.*?(\d[\d\s]*/\s*2700)'
+        acc_match = re.search(pattern, last_page_text, re.DOTALL | re.IGNORECASE)
         
         if acc_match:
-            raw_acc = acc_match.group(1).strip()
-            # Očistíme jen na číslice a lomítko
-            acc_final = re.search(r'(\d[\d\s]*/\s*\d{4})', raw_acc)
-            if acc_final:
-                found_acc = re.sub(r'\s+', '', acc_final.group(1))
-        
-        st.sidebar.info(f"Surový nález účtu ({curr}): {found_acc}")
+            # Vyčistíme mezery z nalezeného čísla (6850 057 / 2700 -> 6850057/2700)
+            found_acc = re.sub(r'\s+', '', acc_match.group(1))
 
-        u_acc = st.text_input("Účet:", value=found_acc)
-        u_vs = st.text_input("VS:", value=found_vs)
-        u_ss = st.text_input("SS:", value="999")
-        u_amt = st.number_input(f"Částka ({curr}):", min_value=0.0, step=100.0)
+        u_acc = st.text_input("Číslo účtu (vytěženo z IZPP):", value=found_acc)
+        u_vs = st.text_input("Variabilní symbol (Číslo smlouvy):", value=found_vs)
+        u_ss = st.text_input("Specifický symbol:", value="999")
+        u_amt = st.number_input(f"Částka ({curr}):", min_value=0.0, step=500.0)
 
     with col2:
-        st.subheader("Výsledek")
+        st.subheader("QR Platba")
         if u_acc and u_vs:
             iban = vytvor_iban_dynamicky(u_acc)
             if iban:
-                pay = f"SPD*1.0*ACC:{iban}*AM:{u_amt:.2f}*CC:{curr}*X-VS:{u_vs}*X-SS:{u_ss}*"
-                st.image(segno.make(pay).to_pil(scale=10))
-                st.success(f"IBAN OK: {iban}")
-                st.code(pay)
+                pay_str = f"SPD*1.0*ACC:{iban}*AM:{u_amt:.2f}*CC:{curr}*X-VS:{u_vs}*X-SS:{u_ss}*"
+                st.image(segno.make(pay_str).to_pil(scale=10), caption=f"Cílový IBAN: {iban}")
+                st.success("QR kód připraven k platbě")
             else:
-                st.error("Nepodařilo se sestavit IBAN z účtu.")
+                st.error("Chyba převodu na IBAN. Zkontrolujte číslo účtu.")
         else:
-            st.warning("Doplňte zbývající údaje (viz Debugger vlevo/vpravo).")
+            st.warning("Data nebyla nalezena. Zkontrolujte, zda je PDF čitelné.")
 
-    # Zobrazení celého textu pro kontrolu v případě chyby
-    with st.expander("Zobrazit kompletní text z PDF (pro kontrolu)"):
-        st.text(full_text)
+    with st.expander("Zobrazit text poslední strany (pro kontrolu)"):
+        st.text(last_page_text)
