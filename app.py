@@ -4,134 +4,97 @@ import re
 import segno
 from io import BytesIO
 
-# --- 1. MATEMATICKY PŘESNÝ IBAN ---
+# --- 1. MATEMATICKY PŘESNÝ PŘEVOD NA IBAN ---
 def vytvor_iban_dynamicky(account_str):
     try:
-        account_str = re.sub(r'[^\d\/-]', '', account_str)
-        if "/" not in account_str: return None
-        full_number, bank_code = account_str.split("/")
+        # 1. Totální očista: odstraníme mezery a vše co není číslo, lomítko nebo pomlčka
+        clean_acc = re.sub(r'[^\d\/-]', '', account_str)
+        
+        if "/" not in clean_acc:
+            return None
+        
+        # Rozdělení na číslo a kód banky
+        full_number, bank_code = clean_acc.split("/")
+        
+        # Ošetření předčíslí (pokud je tam pomlčka)
         prefix = "0"
         number = full_number
-        if "-" in full_number: prefix, number = full_number.split("-")
-        prefix, number, bank_code = prefix.zfill(6), number.zfill(10), bank_code.zfill(4)
+        if "-" in full_number:
+            prefix, number = full_number.split("-")
+        
+        # Doplnění nul na standardní délku (předčíslí 6, číslo 10, banka 4)
+        prefix = prefix.zfill(6)
+        number = number.zfill(10)
+        bank_code = bank_code.zfill(4)
+        
+        # Výpočet kontrolních číslic (modulo 97)
         check_str = f"{bank_code}{prefix}{number}123500"
         remainder = int(check_str) % 97
-        return f"CZ{str(98 - remainder).zfill(2)}{bank_code}{prefix}{number}"
-    except: return None
+        check_digits = str(98 - remainder).zfill(2)
+        
+        return f"CZ{check_digits}{bank_code}{prefix}{number}"
+    except:
+        return None
 
-st.set_page_config(page_title="DIP QR Generátor v6.4", layout="wide")
-st.title("🏦 DIP QR Generátor (Zaměstnanec & Zaměstnavatel)")
+# --- 2. STREAMLIT APLIKACE ---
+st.set_page_config(page_title="QR Generátor v6.8", layout="wide")
+st.title("🏦 QR Generátor (IBAN fix)")
 
-with st.sidebar:
-    if st.button("Vymazat paměť / Nové PDF"):
-        st.session_state.clear()
-        st.rerun()
-
-file = st.file_uploader("1. NAHRÁT PDF SMLOUVU (DIP i Standard)", type="pdf")
+file = st.file_uploader("Nahrajte PDF smlouvu", type="pdf")
 
 if file:
-    if "pdf_text" not in st.session_state or st.session_state.get("last_file") != file.name:
+    if "pdf_raw" not in st.session_state or st.session_state.last_file != file.name:
         with pdfplumber.open(file) as pdf:
-            pages = [p.extract_text() for p in pdf.pages]
-            st.session_state.pdf_pages = pages
+            txt = ""
+            for page in pdf.pages:
+                txt += page.extract_text() + "\n"
+            st.session_state.pdf_raw = txt
             st.session_state.last_file = file.name
 
-if "pdf_pages" in st.session_state:
-    pages = st.session_state.pdf_pages
-    txt_all = "\n".join(pages)
-    
+if "pdf_raw" in st.session_state:
+    raw = st.session_state.pdf_raw
     col1, col2 = st.columns(2)
+    
     with col1:
-        # Volba typu platby
-        typ_platby = st.selectbox("Vyberte typ platby:", [
-            "Zaměstnanec (Instrukce IZPP)",
-            "Zaměstnavatel - A) Individuální příspěvek na DIP (IČO)",
-            "Zaměstnavatel - B) Platba klienta hrazená zam-telem (Bez SS)"
-        ])
-        
         curr = st.selectbox("Měna:", ["CZK", "EUR", "USD"])
         
-        # --- EXTRAKCE DAT ---
-        found_acc, found_vs, found_ks, found_ss, found_amt = "", "", "", "", 0.0
+        # --- HLEDÁNÍ VS ---
+        vs_m = re.search(r'ČÍSLO\s+SMLOUVY:\s*(\d+)', raw, re.IGNORECASE)
+        found_vs = vs_m.group(1) if vs_m else ""
 
-        # 1. Variabilní symbol (Číslo smlouvy) - Vždy z první strany pod CONSEQ
-        vs_m = re.search(r'ČÍSLO\s+SMLOUVY:\s*(\d+)', pages[0], re.IGNORECASE)
-        if vs_m: found_vs = vs_m.group(1)
+        # --- HLEDÁNÍ ÚČTU (Ignoruje mezery) ---
+        found_acc = ""
+        # Najdeme text od "účtu v CZK" až po konec řádku
+        pattern = rf'účtu\s+v\s+{curr}\s*:\s*([\d\s\/-]+)'
+        acc_match = re.search(pattern, raw, re.IGNORECASE)
+        
+        if acc_match:
+            # Tady to chytne i ty mezery (např. "6850 057 / 2700")
+            raw_acc = acc_match.group(1).strip()
+            # A tady ty mezery totálně odstraníme pro zobrazení
+            found_acc = re.sub(r'\s+', '', raw_acc)
 
-        # 2. Logika pro Zaměstnance (IZPP tabulka - předposlední/poslední strana)
-        if "Zaměstnanec" in typ_platby:
-            found_ss = "999"
-            # Hledáme v celém textu řádek s měnou
-            acc_pattern = rf'účtu\s+v\s+{curr}[:\s]*([\d\s\/-]+)'
-            acc_m = re.search(acc_pattern, txt_all, re.IGNORECASE)
-            if acc_m:
-                found_acc = re.sub(r'[^\d\/-]', '', acc_m.group(1))
-
-        # 3. Logika pro Zaměstnavatele (DIP tabulka na straně 5)
-        else:
-            # Hledáme sekci zaměstnavatele (často strana 5, index 4)
-            dip_txt = ""
-            for p in pages:
-                if "INSTRUKCE K ZASÍLÁNÍ PENĚŽNÍCH PROSTŘEDKŮ ZAMĚSTNAVATELEM" in p:
-                    dip_txt = p
-                    break
-            
-            if dip_txt:
-                # Rozdělení na řádky pod nadpisem
-                lines = dip_txt.split('\n')
-                relevant_lines = []
-                start_collecting = False
-                for line in lines:
-                    if "INSTRUKCE K ZASÍLÁNÍ" in line:
-                        start_collecting = True
-                        continue
-                    if start_collecting and len(line.strip()) > 20: # Hledáme řádky s obsahem
-                        relevant_lines.append(line)
-                
-                # Varianta A (1. řádek tabulky)
-                if "A)" in typ_platby and len(relevant_lines) >= 1:
-                    row = relevant_lines[0]
-                    acc_m = re.search(r'(\d[\d\s\/-]*\/\d{4})', row)
-                    if acc_m: found_acc = re.sub(r'[^\d\/-]', '', acc_m.group(1))
-                    
-                    ks_m = re.findall(r'\s(\d{4})\s', row)
-                    if ks_m: found_ks = ks_m[-1] # Poslední sloupec
-                    
-                    u_ico = st.text_input("Zadejte IČO zaměstnavatele (pro SS):", max_chars=8)
-                    found_ss = re.sub(r'\D', '', u_ico)
-
-                # Varianta B (2. řádek tabulky)
-                elif "B)" in typ_platby and len(relevant_lines) >= 2:
-                    row = relevant_lines[1]
-                    acc_m = re.search(r'(\d[\d\s\/-]*\/\d{4})', row)
-                    if acc_m: found_acc = re.sub(r'[^\d\/-]', '', acc_m.group(1))
-                    
-                    ks_m = re.findall(r'\s(\d{4})\s', row)
-                    if ks_m: found_ks = ks_m[-1] # Poslední sloupec
-                    found_ss = "" # Dle tabulky NEVYPLŇOVAT
-
-        st.divider()
-        u_acc = st.text_input("Účet (z PDF):", value=found_acc)
-        u_vs = st.text_input("VS (číslo smlouvy):", value=found_vs)
-        u_ks = st.text_input("KS (z PDF):", value=found_ks)
-        u_ss = st.text_input("SS (IČO/999):", value=found_ss)
+        u_acc = st.text_input("Číslo účtu (očištěno):", value=found_acc)
+        u_vs = st.text_input("Variabilní symbol:", value=found_vs)
+        u_ss = st.text_input("Specifický symbol:", value="999")
         u_amt = st.number_input(f"Částka ({curr}):", min_value=0.0, step=100.0)
 
     with col2:
-        st.subheader("Výsledek")
+        st.subheader("Výsledek pro banku")
         if u_acc and u_vs:
             iban = vytvor_iban_dynamicky(u_acc)
             if iban:
-                parts = [f"SPD*1.0*ACC:{iban}", f"AM:{u_amt:.2f}", f"CC:{curr}", f"X-VS:{u_vs}"]
-                if u_ks: parts.append(f"X-KS:{u_ks}")
-                if u_ss: parts.append(f"X-SS:{u_ss}")
-                pay = "*".join(parts) + "*"
+                # Sestavení QR řetězce (VŽDY S IBANEM)
+                pay_str = f"SPD*1.0*ACC:{iban}*AM:{u_amt:.2f}*CC:{curr}*X-VS:{u_vs}*X-SS:{u_ss}*"
                 
-                qr = segno.make(pay, error='m')
+                qr = segno.make(pay_str, error='m')
                 out = BytesIO()
                 qr.save(out, kind='png', scale=10)
-                st.image(out, caption=f"QR Platba - {typ_platby}")
-                st.success(f"IBAN: {iban}")
-                st.code(pay)
+                
+                st.image(out, caption="Skenujte v bankovní aplikaci")
+                st.success(f"Převedeno na IBAN: {iban}")
+                st.code(pay_str)
+            else:
+                st.error("❌ Nepodařilo se vytvořit platný IBAN. Zkontrolujte formát účtu.")
         else:
-            st.warning("⚠️ Nahrajte PDF a vyberte typ platby.")
+            st.info("Doplňte údaje pro vygenerování QR kódu.")
